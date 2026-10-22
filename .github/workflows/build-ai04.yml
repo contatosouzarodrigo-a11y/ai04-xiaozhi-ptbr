@@ -49,7 +49,7 @@ jobs:
           with ZipFile(archive) as package:
               package.extractall(target)
           PY
-          patch="$GITHUB_WORKSPACE/AI04-2.5.3.1-to-2.5.3.3.patch"
+          patch="$GITHUB_WORKSPACE/AI04-2.5.3.1-to-2.5.3.4.patch"
           test -f "$patch"
           git -C xiaozhi apply --check --whitespace=error "$patch"
           git -C xiaozhi apply --whitespace=error "$patch"
@@ -63,6 +63,7 @@ jobs:
           source "$IDF_PATH/export.sh"
           python -m unittest scripts.tests.test_build.BoardMenuTests.test_board_menu_is_sorted_and_matches_cmake -v
           python tools/ai04-installer/test_nvs_patch.py
+          python tools/ai04-installer/test_stock_layout.py
           python scripts/build.py davinci/ai04-c3 --language pt-BR --wake-word disabled
 
       - name: Assemble the review-only Windows updater
