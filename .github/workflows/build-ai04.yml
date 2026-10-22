@@ -6,6 +6,8 @@ on:
     # Monday 01:23 in São Paulo while Brazil uses UTC-3.
     - cron: "23 4 * * 1"
 
+# This workflow builds a candidate only. It never changes the live AI04 OTA
+# manifest, so an upstream change cannot reach a device before review.
 permissions:
   contents: read
 
@@ -31,8 +33,9 @@ jobs:
         run: |
           set -euo pipefail
           git clone --depth=1 https://github.com/78/xiaozhi-esp32.git xiaozhi
+          git -C xiaozhi rev-parse HEAD | tee upstream-commit.txt
 
-      - name: Apply the verified AI04 overlay
+      - name: Apply the verified AI04 PT-BR overlay and native OTA delta
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -42,10 +45,14 @@ jobs:
           archive = Path("AI04-XiaoZhi-Overlay-2.5.3.1.zip")
           target = Path("xiaozhi")
           if not archive.is_file():
-              raise SystemExit(f"Missing control-repository artifact: {archive}")
+              raise SystemExit(f"Missing verified base overlay: {archive}")
           with ZipFile(archive) as package:
               package.extractall(target)
           PY
+          patch="$GITHUB_WORKSPACE/AI04-2.5.3.1-to-2.5.3.3.patch"
+          test -f "$patch"
+          git -C xiaozhi apply --check --whitespace=error "$patch"
+          git -C xiaozhi apply --whitespace=error "$patch"
 
       - name: Validate and build the native PT-BR firmware
         working-directory: xiaozhi
@@ -58,24 +65,28 @@ jobs:
           python tools/ai04-installer/test_nvs_patch.py
           python scripts/build.py davinci/ai04-c3 --language pt-BR --wake-word disabled
 
-      - name: Assemble the review-only release candidate
+      - name: Assemble the review-only Windows updater
         working-directory: xiaozhi
         env:
           FIRMWARE_VERSION: 2.5.3.${{ github.run_number }}
+          AI04_FIRMWARE_URL: https://raw.githubusercontent.com/${{ github.repository }}/ai04-ota/xiaozhi.bin
         run: |
           set -euo pipefail
           python tools/ai04-installer/prepare_release.py \
             --build-dir build \
             --output "dist/AI04-Updater-${FIRMWARE_VERSION}" \
-            --version "$FIRMWARE_VERSION"
+            --version "$FIRMWARE_VERSION" \
+            --firmware-url "$AI04_FIRMWARE_URL"
           cp build/xiaozhi.bin "dist/xiaozhi-${FIRMWARE_VERSION}.bin"
           sha256sum "dist/xiaozhi-${FIRMWARE_VERSION}.bin" \
             > "dist/xiaozhi-${FIRMWARE_VERSION}.bin.sha256"
 
-      - name: Upload the firmware candidate
+      - name: Upload the firmware candidate for review
         uses: actions/upload-artifact@v4
         with:
           name: AI04-PT-BR-${{ github.run_number }}
-          path: xiaozhi/dist
+          path: |
+            xiaozhi/dist
+            upstream-commit.txt
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90
