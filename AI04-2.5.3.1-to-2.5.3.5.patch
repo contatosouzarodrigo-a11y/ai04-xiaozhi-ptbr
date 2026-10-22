@@ -1,0 +1,1195 @@
+diff --git a/.github/workflows/ai04-upstream-candidate.yml b/.github/workflows/ai04-upstream-candidate.yml
+index 88cc208..a1580d1 100644
+--- a/.github/workflows/ai04-upstream-candidate.yml
++++ b/.github/workflows/ai04-upstream-candidate.yml
+@@ -73,6 +73,7 @@ jobs:
+           python -m unittest scripts.tests.test_build.BoardMenuTests.test_board_menu_is_sorted_and_matches_cmake -v
+           python scripts/build.py davinci/ai04-c3 --language pt-BR --wake-word disabled
+           python tools/ai04-installer/test_nvs_patch.py
++          python tools/ai04-installer/test_stock_layout.py
+ 
+       - name: Push a reviewable candidate and open a pull request
+         if: steps.candidate.outputs.changed == 'true'
+diff --git a/AI04-OVERLAY-README.md b/AI04-OVERLAY-README.md
+index 116a4c3..5a560d1 100644
+--- a/AI04-OVERLAY-README.md
++++ b/AI04-OVERLAY-README.md
+@@ -1,8 +1,8 @@
+ # AI04 C3 overlay for XiaoZhi
+ 
+ This overlay adds the reconstructed `davinci-ai04-c3` board, the PT-BR build
+-path, a controlled OTA relay, an 8 MiB USB migration package and an optional
+-GitHub upstream-candidate workflow to the XiaoZhi source tree.
++path, a native controlled OTA manifest, an 8 MiB USB migration package and an
++optional GitHub upstream-candidate workflow to the XiaoZhi source tree.
+ 
+ ## Apply
+ 
+@@ -21,12 +21,12 @@ verified against XiaoZhi commit `7e69845d818553ac045efbcde746b22bef6eecf6`.
+ 
+ ```sh
+ source "$IDF_PATH/export.sh"
+-XIAOZHI_PROJECT_VERSION=2.5.3.1 \
++XIAOZHI_PROJECT_VERSION=<versao> \
+   python scripts/build.py davinci/ai04-c3 --language pt-BR --wake-word disabled
+ python tools/ai04-installer/prepare_release.py \
+   --build-dir build \
+-  --output releases/AI04-Updater-2.5.3.1 \
+-  --version 2.5.3.1
++  --output releases/AI04-Updater-<versao> \
++  --version <versao>
+ ```
+ 
+ The binary version and the OTA manifest version must be identical. Do not use
+@@ -35,20 +35,31 @@ version comparison.
+ 
+ ## Safety model
+ 
+-The migration installer reads all 8 MiB before writing anything, preserves the
+-existing NVS data, and changes only Wi-Fi and `wifi.ota_url`. The v2 layout is
+-not OTA-compatible with the legacy v1 layout, so the first migration must use
+-USB. Do not run it until the controlled HTTPS OTA relay and release manifest
+-have been deployed.
++The migration installer reads all 8 MiB before writing anything and validates
++the exact factory AI04 table: `model` at `0x10000`, `ota_0` at `0x100000`, and
++`ota_1` at `0x480000`. It preserves the bootloader, partition table, model
++data and inactive app slot. It changes only Wi-Fi/`wifi.ota_url` plus the
++currently selected OTA application slot, so the original boot selection remains
++valid. The installer writes the official XiaoZhi activation/configuration URL;
++the compiled AI04 firmware reads its PT-BR update offer only from the controlled
++HTTPS manifest.
+ 
+-Use a real 8 MiB backup from an original AI04 to validate the NVS patcher
+-before first-device use. The included automated tests use synthetic NVS pages
+-and cannot substitute for that device-specific check.
++Use a real 8 MiB backup from an original AI04 to validate both the NVS patcher
++and stock-layout detector before first-device use. The included automated tests
++use synthetic data and cannot substitute for that device-specific check.
++Never commit or publish that raw backup: its NVS may contain Wi-Fi credentials
++and activation tokens.
+ 
+-## OTA relay
++## Native OTA channel
+ 
+-Set the relay's `XIAOZHI_UPSTREAM_URL` to the current official default,
+-`https://api.tenclass.net/xiaozhi/ota/`, and set `AI04_MANIFEST_URL` to the
+-controlled HTTPS manifest that serves the release `xiaozhi.bin`. The official
+-cloud firmware builder cannot compile this reconstructed board until the board
+-definition has been merged upstream.
++For the AI04 only, the native firmware always contacts
++`https://api.tenclass.net/xiaozhi/ota/` for activation, MQTT/WebSocket settings
++and time. It then reads `CONFIG_AI04_OTA_MANIFEST_URL` without transmitting
++device identity. A valid manifest must contain a numeric version, an HTTPS
++firmware URL and a lowercase 64-character SHA-256. The device hashes the
++downloaded binary before selecting it for boot. A missing, invalid or
++hash-mismatched manifest removes the firmware offer entirely. That fail-closed
++behavior prevents an English or altered image from being installed.
++
++The official cloud firmware builder cannot compile this reconstructed board
++until the board definition has been merged upstream.
+diff --git a/main/Kconfig.projbuild b/main/Kconfig.projbuild
+index 64c0b46..0d70b4e 100644
+--- a/main/Kconfig.projbuild
++++ b/main/Kconfig.projbuild
+@@ -6,6 +6,14 @@ config OTA_URL
+     help
+         The application will access this URL to check for new firmwares and server address.
+ 
++config AI04_OTA_MANIFEST_URL
++    string "AI04 PT-BR firmware manifest URL"
++    default ""
++    help
++        Only the reconstructed DaVinci AI04 C3 board reads this HTTPS manifest.
++        It supplies the approved PT-BR firmware while the regular OTA endpoint
++        continues to supply activation and XiaoZhi backend configuration.
++
+ choice
+     prompt "Flash Assets"
+     default FLASH_DEFAULT_ASSETS if !USE_EMOTE_MESSAGE_STYLE
+diff --git a/main/boards/davinci/ai04-c3/README.md b/main/boards/davinci/ai04-c3/README.md
+index 5e8d390..07ce4ff 100644
+--- a/main/boards/davinci/ai04-c3/README.md
++++ b/main/boards/davinci/ai04-c3/README.md
+@@ -17,17 +17,36 @@ LEDs.
+ | ES8311 PA enable | 10 |
+ | Boot button | 9 |
+ 
+-The build has no compiled-in OTA endpoint. A production installer must set
+-`wifi.ota_url` to the controlled AI04 OTA relay before OTA is enabled. This
+-prevents an official response from silently replacing the PT-BR firmware.
+-
+-The board uses the current 8 MB v2 partition map. A legacy v1 device needs one
+-USB migration before it can use the two-slot v2 OTA layout.
+-
+-Wake-word detection is disabled in this first reconstruction. The reference
+-image contains no embedded WakeNet model and the ESP32-C3 has limited internal
+-RAM; the boot button still starts a conversation. This avoids shipping an
+-English wake word and preserves headroom for both OTA slots.
++The build keeps the official XiaoZhi endpoint only for activation and backend
++configuration. Firmware offers come exclusively from the compiled
++`CONFIG_AI04_OTA_MANIFEST_URL`, which requires an HTTPS binary URL and its
++SHA-256. If that manifest is unavailable or invalid, the board disables the
++firmware offer rather than falling back to an official image in another
++language.
++
++## Verified stock flash layout
++
++The factory AI04 uses a different 8 MiB layout from XiaoZhi's generic `v2/8m`
++table. It was reconstructed from a complete stock flash dump:
++
++| Partition | Offset | Size |
++| --- | ---: | ---: |
++| `nvs` | `0x9000` | 16 KiB |
++| `otadata` | `0xd000` | 8 KiB |
++| `phy_init` | `0xf000` | 4 KiB |
++| `model` | `0x10000` | 960 KiB |
++| `ota_0` | `0x100000` | 3.5 MiB |
++| `ota_1` | `0x480000` | 3.5 MiB |
++
++The USB installer validates this exact table before writing. It preserves the
++bootloader, partition table, model data and inactive official OTA slot, then
++places the PT-BR binary in the currently selected stock OTA slot. This lets
++the original boot selection continue unchanged and keeps a recovery image.
++
++Wake-word detection is disabled in this first reconstruction. The factory
++`model` partition is preserved rather than repurposed for generic UI assets;
++the boot button still starts a conversation. This avoids shipping an English
++wake word and preserves recovery compatibility with the stock firmware.
+ 
+ ## Upstream tracking
+ 
+diff --git a/main/boards/davinci/ai04-c3/config.json b/main/boards/davinci/ai04-c3/config.json
+index 78c23d4..ec9a101 100644
+--- a/main/boards/davinci/ai04-c3/config.json
++++ b/main/boards/davinci/ai04-c3/config.json
+@@ -7,8 +7,9 @@
+       "name": "davinci-ai04-c3",
+       "sdkconfig_append": [
+         "CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y",
+-        "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"partitions/v2/8m.csv\"",
+-        "CONFIG_OTA_URL=\"\"",
++        "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"partitions/ai04-stock-8m.csv\"",
++        "CONFIG_OTA_URL=\"https://api.tenclass.net/xiaozhi/ota/\"",
++        "CONFIG_AI04_OTA_MANIFEST_URL=\"https://raw.githubusercontent.com/contatosouzarodrigo-a11y/ai04-xiaozhi-ptbr/ai04-ota/manifest.json\"",
+         "CONFIG_WAKE_WORD_DISABLED=y",
+         "CONFIG_PM_ENABLE=y",
+         "CONFIG_FREERTOS_USE_TICKLESS_IDLE=y",
+diff --git a/main/ota.cc b/main/ota.cc
+index 124d333..92fcf03 100644
+--- a/main/ota.cc
++++ b/main/ota.cc
+@@ -13,11 +13,13 @@
+ #include <esp_efuse.h>
+ #include <esp_efuse_table.h>
+ #include <esp_heap_caps.h>
++#include <psa/crypto.h>
+ #ifdef SOC_HMAC_SUPPORTED
+ #include <esp_hmac.h>
+ #endif
+ 
+ #include <algorithm>
++#include <array>
+ #include <charconv>
+ #include <cstring>
+ #include <expected>
+@@ -54,12 +56,20 @@ Ota::~Ota() {
+ }
+ 
+ std::string Ota::GetCheckVersionUrl() {
++#if CONFIG_BOARD_TYPE_DAVINCI_AI04_C3
++    // The reconstructed AI04 must keep its activation and XiaoZhi backend
++    // connection on the official endpoint.  Its firmware offer is replaced
++    // separately from a controlled PT-BR manifest below, so a stale NVS
++    // ota_url can never restore an English OTA channel.
++    return CONFIG_OTA_URL;
++#else
+     Settings settings("wifi", false);
+     std::string url = settings.GetString("ota_url");
+     if (url.empty()) {
+         url = CONFIG_OTA_URL;
+     }
+     return url;
++#endif
+ }
+ 
+ std::unique_ptr<Http> Ota::SetupHttp() {
+@@ -81,6 +91,76 @@ std::unique_ptr<Http> Ota::SetupHttp() {
+     return http;
+ }
+ 
++#if CONFIG_BOARD_TYPE_DAVINCI_AI04_C3
++bool Ota::ApplyAi04FirmwareManifest() {
++    std::string manifest_url = CONFIG_AI04_OTA_MANIFEST_URL;
++    if (manifest_url.empty()) {
++        ESP_LOGE(TAG, "AI04 PT-BR manifest URL is not configured");
++        return false;
++    }
++
++    // Do not forward the device ID, MAC address, activation headers, or
++    // system-information JSON to the static release host.  Those are needed
++    // only by the official XiaoZhi endpoint above.
++    auto network = Board::GetInstance().GetNetwork();
++    auto http = network->CreateHttp(0);
++    http->SetHeader("Accept", "application/json");
++    if (auto opened = http->Open("GET", manifest_url); !opened) {
++        ESP_LOGE(TAG, "Failed to open AI04 PT-BR manifest: %s", opened.error().ToString().c_str());
++        return false;
++    }
++
++    auto status_code = http->GetStatusCode();
++    if (!status_code) {
++        ESP_LOGE(TAG, "Failed to read AI04 manifest status: %s", status_code.error().ToString().c_str());
++        return false;
++    }
++    if (*status_code != 200) {
++        ESP_LOGE(TAG, "Failed to get AI04 PT-BR manifest, status code: %d", *status_code);
++        return false;
++    }
++
++    std::string data = http->ReadAll();
++    http->Close();
++    cJSON* root = cJSON_Parse(data.c_str());
++    if (root == NULL) {
++        ESP_LOGE(TAG, "Failed to parse AI04 PT-BR manifest");
++        return false;
++    }
++
++    cJSON* firmware = cJSON_GetObjectItem(root, "firmware");
++    cJSON* version = cJSON_IsObject(firmware) ? cJSON_GetObjectItem(firmware, "version") : NULL;
++    cJSON* url = cJSON_IsObject(firmware) ? cJSON_GetObjectItem(firmware, "url") : NULL;
++    cJSON* sha256 = cJSON_IsObject(firmware) ? cJSON_GetObjectItem(firmware, "sha256") : NULL;
++    const bool valid_https_url = cJSON_IsString(url) && url->valuestring != NULL &&
++        std::strncmp(url->valuestring, "https://", std::strlen("https://")) == 0;
++    const bool valid_version = cJSON_IsString(version) && version->valuestring != NULL &&
++        ParseVersion(version->valuestring).has_value();
++    const bool valid_sha256 = cJSON_IsString(sha256) && sha256->valuestring != NULL &&
++        std::strlen(sha256->valuestring) == 64 &&
++        std::all_of(sha256->valuestring, sha256->valuestring + 64, [](char value) {
++            return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f');
++        });
++    if (!valid_version || !valid_https_url || !valid_sha256) {
++        ESP_LOGE(TAG, "AI04 PT-BR manifest needs a numeric version, HTTPS URL, and lowercase SHA-256");
++        cJSON_Delete(root);
++        return false;
++    }
++
++    firmware_version_ = version->valuestring;
++    firmware_url_ = url->valuestring;
++    firmware_sha256_ = sha256->valuestring;
++    has_new_version_ = IsNewVersionAvailable(current_version_, firmware_version_);
++    cJSON* force = cJSON_GetObjectItem(firmware, "force");
++    if (cJSON_IsNumber(force) && force->valueint == 1) {
++        has_new_version_ = true;
++    }
++    ESP_LOGI(TAG, "AI04 PT-BR manifest version: %s", firmware_version_.c_str());
++    cJSON_Delete(root);
++    return true;
++}
++#endif
++
+ /* 
+  * Specification: https://ccnphfhqs21z.feishu.cn/wiki/FjW6wZmisimNBBkov6OcmfvknVd
+  */
+@@ -253,6 +333,18 @@ NetworkResult<> Ota::CheckVersion() {
+         ESP_LOGW(TAG, "No firmware section found!");
+     }
+ 
++#if CONFIG_BOARD_TYPE_DAVINCI_AI04_C3
++    if (!ApplyAi04FirmwareManifest()) {
++        // Fail closed: keep activation/MQTT/WebSocket fields obtained above,
++        // but never fall back to a possibly English official firmware image.
++        has_new_version_ = false;
++        firmware_version_.clear();
++        firmware_url_.clear();
++        firmware_sha256_.clear();
++        ESP_LOGW(TAG, "AI04 PT-BR OTA offer disabled until its manifest is reachable and valid");
++    }
++#endif
++
+     cJSON_Delete(root);
+     return {};
+ }
+@@ -277,7 +369,8 @@ void Ota::MarkCurrentVersionValid() {
+     }
+ }
+ 
+-bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progress, size_t speed)> callback) {
++bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progress, size_t speed)> callback,
++                  const std::string& expected_sha256) {
+     ESP_LOGI(TAG, "Upgrading firmware from %s", firmware_url.c_str());
+     esp_ota_handle_t update_handle = 0;
+     auto update_partition = esp_ota_get_next_update_partition(NULL);
+@@ -320,6 +413,25 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
+         return false;
+     }
+ 
++    const bool verify_sha256 = !expected_sha256.empty();
++    psa_hash_operation_t hash_operation = PSA_HASH_OPERATION_INIT;
++    bool hash_started = false;
++    auto abort_hash = [&]() {
++        if (hash_started) {
++            psa_hash_abort(&hash_operation);
++            hash_started = false;
++        }
++    };
++    if (verify_sha256) {
++        if (psa_crypto_init() != PSA_SUCCESS ||
++            psa_hash_setup(&hash_operation, PSA_ALG_SHA_256) != PSA_SUCCESS) {
++            ESP_LOGE(TAG, "Failed to initialize SHA-256 verification");
++            heap_caps_free(buffer);
++            return false;
++        }
++        hash_started = true;
++    }
++
+     size_t buffer_offset = 0;  // Current data size in buffer
+     size_t total_read = 0, recent_read = 0;
+     auto last_calc_time = esp_timer_get_time();
+@@ -327,6 +439,7 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
+         auto ret = http->Read(buffer + buffer_offset, PAGE_SIZE - buffer_offset);
+         if (!ret) {
+             ESP_LOGE(TAG, "Failed to read HTTP data: %s", ret.error().ToString().c_str());
++            abort_hash();
+             heap_caps_free(buffer);
+             return false;
+         }
+@@ -355,6 +468,7 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
+                 if (esp_ota_begin(update_partition, OTA_WITH_SEQUENTIAL_WRITES, &update_handle)) {
+                     esp_ota_abort(update_handle);
+                     ESP_LOGE(TAG, "Failed to begin OTA");
++                    abort_hash();
+                     heap_caps_free(buffer);
+                     return false;
+                 }
+@@ -367,10 +481,21 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
+         // Write to flash when buffer is full (4KB) or it's the last chunk
+         bool is_last_chunk = (n == 0);
+         if (buffer_offset == PAGE_SIZE || (is_last_chunk && buffer_offset > 0)) {
++            if (verify_sha256 &&
++                psa_hash_update(&hash_operation, reinterpret_cast<const uint8_t*>(buffer), buffer_offset) != PSA_SUCCESS) {
++                ESP_LOGE(TAG, "Failed to calculate firmware SHA-256");
++                if (image_header_checked) {
++                    esp_ota_abort(update_handle);
++                }
++                abort_hash();
++                heap_caps_free(buffer);
++                return false;
++            }
+             auto err = esp_ota_write(update_handle, buffer, buffer_offset);
+             if (err != ESP_OK) {
+                 ESP_LOGE(TAG, "Failed to write OTA data: %s", esp_err_to_name(err));
+                 esp_ota_abort(update_handle);
++                abort_hash();
+                 heap_caps_free(buffer);
+                 return false;
+             }
+@@ -385,6 +510,40 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
+     http->Close();
+     heap_caps_free(buffer);
+ 
++    if (total_read != content_length || !image_header_checked) {
++        ESP_LOGE(TAG, "Firmware download is truncated or has no valid image header");
++        if (image_header_checked) {
++            esp_ota_abort(update_handle);
++        }
++        abort_hash();
++        return false;
++    }
++
++    if (verify_sha256) {
++        std::array<uint8_t, 32> digest{};
++        size_t digest_length = 0;
++        const psa_status_t status = psa_hash_finish(&hash_operation, digest.data(), digest.size(), &digest_length);
++        hash_started = false;
++        if (status != PSA_SUCCESS || digest_length != digest.size()) {
++            ESP_LOGE(TAG, "Failed to finish firmware SHA-256 verification");
++            esp_ota_abort(update_handle);
++            return false;
++        }
++
++        static constexpr char kHex[] = "0123456789abcdef";
++        std::string actual_sha256;
++        actual_sha256.reserve(digest.size() * 2);
++        for (uint8_t byte : digest) {
++            actual_sha256.push_back(kHex[byte >> 4]);
++            actual_sha256.push_back(kHex[byte & 0x0f]);
++        }
++        if (actual_sha256 != expected_sha256) {
++            ESP_LOGE(TAG, "Firmware SHA-256 does not match the AI04 PT-BR manifest");
++            esp_ota_abort(update_handle);
++            return false;
++        }
++    }
++
+     esp_err_t err = esp_ota_end(update_handle);
+     if (err != ESP_OK) {
+         if (err == ESP_ERR_OTA_VALIDATE_FAILED) {
+@@ -406,7 +565,11 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
+ }
+ 
+ bool Ota::StartUpgrade(std::function<void(int progress, size_t speed)> callback) {
++#if CONFIG_BOARD_TYPE_DAVINCI_AI04_C3
++    return Upgrade(firmware_url_, callback, firmware_sha256_);
++#else
+     return Upgrade(firmware_url_, callback);
++#endif
+ }
+ 
+ 
+diff --git a/main/ota.h b/main/ota.h
+index eda3fd7..21e4761 100644
+--- a/main/ota.h
++++ b/main/ota.h
+@@ -24,7 +24,8 @@ public:
+     bool HasActivationCode() { return has_activation_code_; }
+     bool HasServerTime() { return has_server_time_; }
+     bool StartUpgrade(std::function<void(int progress, size_t speed)> callback);
+-    static bool Upgrade(const std::string& firmware_url, std::function<void(int progress, size_t speed)> callback);
++    static bool Upgrade(const std::string& firmware_url, std::function<void(int progress, size_t speed)> callback,
++                        const std::string& expected_sha256 = "");
+     void MarkCurrentVersionValid();
+ 
+     const std::string& GetFirmwareVersion() const { return firmware_version_; }
+@@ -47,6 +48,9 @@ private:
+     std::string current_version_;
+     std::string firmware_version_;
+     std::string firmware_url_;
++#if CONFIG_BOARD_TYPE_DAVINCI_AI04_C3
++    std::string firmware_sha256_;
++#endif
+     std::string activation_challenge_;
+     std::string serial_number_;
+     int activation_timeout_ms_ = 30000;
+@@ -56,6 +60,9 @@ private:
+     bool IsNewVersionAvailable(const std::string& currentVersion, const std::string& newVersion);
+     std::string GetActivationPayload();
+     std::unique_ptr<Http> SetupHttp();
++#if CONFIG_BOARD_TYPE_DAVINCI_AI04_C3
++    bool ApplyAi04FirmwareManifest();
++#endif
+ };
+ 
+ #endif // _OTA_H
+diff --git a/partitions/ai04-stock-8m.csv b/partitions/ai04-stock-8m.csv
+new file mode 100644
+index 0000000..f6fa236
+--- /dev/null
++++ b/partitions/ai04-stock-8m.csv
+@@ -0,0 +1,11 @@
++# DaVinci AI04 C3 factory-compatible partition map (8 MiB flash).
++# Reconstructed from a verified stock flash dump. Keep this physical layout:
++# the USB migrator writes only the currently selected OTA app partition and
++# preserves the stock bootloader, partition table, model data and fallback app.
++# Name,    Type, SubType, Offset,    Size,      Flags
++nvs,       data, nvs,     0x9000,    0x4000,
++otadata,   data, ota,     0xd000,    0x2000,
++phy_init,  data, phy,     0xf000,    0x1000,
++model,     data, 0x82,    0x10000,   0xf0000,
++ota_0,     app,  ota_0,   0x100000,  0x380000,
++ota_1,     app,  ota_1,   0x480000,  0x380000,
+diff --git a/tools/ai04-installer/README.md b/tools/ai04-installer/README.md
+index 894d6b2..7b163d2 100644
+--- a/tools/ai04-installer/README.md
++++ b/tools/ai04-installer/README.md
+@@ -1,8 +1,10 @@
+ # Instalador USB do AI04 para Windows
+ 
+-Este diretório gera o migrador USB que leva um AI04 da tabela de partições
+-legada para o layout atual de 8 MB com duas partições OTA. Ele não é um
+-atualizador OTA: a migração inicial precisa do cabo USB.
++Este diretório gera o migrador USB para o layout original de 8 MB do AI04.
++Ele não troca a tabela de partições: valida a tabela de fábrica, mantém o
++bootloader, modelo e firmware de recuperação, e grava o PT-BR somente no slot
++OTA que o próprio AI04 já está usando. Ele não é um atualizador OTA: a primeira
++instalação precisa do cabo USB.
+ 
+ O instalador sempre faz uma leitura completa de 8 MiB antes de gravar. Em vez
+ de apagar a identidade do robô, ele preserva a NVS existente e troca somente:
+@@ -10,10 +12,13 @@ de apagar a identidade do robô, ele preserva a NVS existente e troca somente:
+ - `wifi.ssid`
+ - `wifi.password`
+ - `wifi.channel`
+-- `wifi.ota_url`
++- `wifi.ota_url` (preenchida automaticamente com o endpoint oficial de
++  ativação/configuração do XiaoZhi)
+ 
+-Assim, ativação e dados não relacionados permanecem no backup/NVS. A NVS deve
+-ser simples (não criptografada) e válida; se não for, o processo para antes de
++Assim, ativação e dados não relacionados permanecem no backup/NVS. O firmware
++AI04 decide o binário OTA pelo seu manifesto PT-BR controlado pelo projeto; o
++valor de `wifi.ota_url` não é mais usado como canal de firmware. A NVS deve ser
++simples (não criptografada) e válida; se não for, o processo para antes de
+ gravar o firmware.
+ 
+ ## Preparar um pacote
+@@ -22,17 +27,18 @@ Após uma compilação do ESP-IDF, execute. A versão precisa ser a mesma usada
+ para compilar o binário, pois é ela que o dispositivo compara durante o OTA:
+ 
+ ```sh
+-XIAOZHI_PROJECT_VERSION=2.5.3.1 python3 scripts/build.py davinci/ai04-c3 --language pt-BR --wake-word disabled
++XIAOZHI_PROJECT_VERSION=<versao> python3 scripts/build.py davinci/ai04-c3 --language pt-BR --wake-word disabled
+ python3 tools/ai04-installer/prepare_release.py \
+   --build-dir build \
+-  --output releases/AI04-Updater-2.5.3.1 \
+-  --version 2.5.3.1
++  --output releases/AI04-Updater-<versao> \
++  --version <versao>
+ ```
+ 
+ O pacote inclui `ota-manifest.template.json`, já com a versão e SHA-256 do
+ binário. Publique `payload/xiaozhi.bin` em HTTPS, troque apenas a URL no
+-arquivo e publique-o como o manifesto consumido pelo relay. Se a URL pública
+-já existir, passe `--firmware-url https://.../xiaozhi.bin` para gerar
++arquivo e publique-o como o manifesto consumido pelo relay. O AI04 confere o
++SHA-256 antes de tornar uma imagem OTA inicializável. Se a URL pública já
++existir, passe `--firmware-url https://.../xiaozhi.bin` para gerar
+ `ota-manifest.json` pronto.
+ 
+ Para um pacote sem Python no PC do cliente, execute `package_windows.ps1` em
+@@ -46,19 +52,23 @@ normal:
+ 
+ ```powershell
+ Set-ExecutionPolicy -Scope Process Bypass
+-.\install-ai04.ps1 -Port COM5 -Ssid "MinhaRede" -OtaUrl "https://seu-relay/ota/"
++.\install-ai04.ps1 -Port COM5 -Ssid "MinhaRede"
+ ```
+ 
+ O script pede a senha de forma oculta, cria o backup e exige a confirmação
+-`AI04`. Ele só aceita uma URL HTTPS do relay OTA controlado. Sem uma URL do
+-relay já implantado, não rode a migração: a proteção contra o firmware oficial
+-em inglês depende dela.
++`AI04`. Antes de gravar, ele recusa qualquer mapa de flash diferente do AI04
++original. A URL oficial do XiaoZhi é mantida somente para ativação e
++configuração; o binário OTA é decidido pelo manifesto PT-BR fixado no firmware.
++Guarde o backup apenas de forma privada: a NVS pode conter credenciais Wi-Fi e
++tokens de ativação.
+ 
+ ## Verificações
+ 
+ ```sh
+ python3 tools/ai04-installer/test_nvs_patch.py
++python3 tools/ai04-installer/test_stock_layout.py
+ ```
+ 
+-O teste cobre atualização de Wi-Fi, preservação de outro namespace, criação do
+-namespace Wi-Fi, rotação de página NVS e recusa de dados inválidos.
++Os testes cobrem atualização de Wi-Fi, preservação de outro namespace, criação
++do namespace Wi-Fi, rotação de página NVS, recusa de dados inválidos e
++validação do mapa original/slot OTA ativo.
+diff --git a/tools/ai04-installer/install-ai04.ps1 b/tools/ai04-installer/install-ai04.ps1
+index 4db7049..4c3d4fd 100644
+--- a/tools/ai04-installer/install-ai04.ps1
++++ b/tools/ai04-installer/install-ai04.ps1
+@@ -1,5 +1,6 @@
+ # AI04 USB migration installer for Windows.
+-# The script makes a complete 8 MiB backup before it changes the flash.
++# The script makes a complete 8 MiB backup, validates the stock layout, and
++# changes only NVS plus the currently selected OTA application partition.
+ [CmdletBinding()]
+ param(
+     [Parameter(Mandatory = $true)]
+@@ -12,9 +13,8 @@ param(
+ 
+     [switch]$OpenNetwork,
+ 
+-    [Parameter(Mandatory = $true)]
+     [ValidatePattern("^https://")]
+-    [string]$OtaUrl,
++    [string]$OtaUrl = "https://api.tenclass.net/xiaozhi/ota/",
+ 
+     [ValidateRange(0, 14)]
+     [int]$Channel = 0,
+@@ -94,7 +94,9 @@ function Copy-Range([string]$Input, [string]$Output, [Int64]$Offset, [Int64]$Len
+ 
+ Require-File $releasePath
+ $release = Get-Content -LiteralPath $releasePath -Raw | ConvertFrom-Json
+-if ($release.board -ne "davinci-ai04-c3" -or $release.flash_size -ne $expectedFlashSize) {
++if ($release.board -ne "davinci-ai04-c3" -or $release.flash_size -ne $expectedFlashSize -or
++    $release.required_stock_layout -ne "davinci-ai04-c3-stock-8m" -or
++    $release.installation_strategy -ne "preserve-stock-layout") {
+     throw "release.json não é um pacote AI04 C3 de 8 MiB válido."
+ }
+ foreach ($property in $release.payload.PSObject.Properties) {
+@@ -132,6 +134,29 @@ if (Test-Path -LiteralPath $script:NvsPatcherExe -PathType Leaf) {
+     $script:NvsPatcherPrefix = @($script:PythonPrefix + (Join-Path $PSScriptRoot "nvs_patch.py"))
+ }
+ 
++$script:StockLayoutExe = Join-Path $PSScriptRoot "tools\stock_layout.exe"
++if (Test-Path -LiteralPath $script:StockLayoutExe -PathType Leaf) {
++    $script:StockLayoutPrefix = @()
++} else {
++    if (-not $script:PythonExe) {
++        throw "tools\stock_layout.exe não foi encontrado e não há Python disponível."
++    }
++    $script:StockLayoutExe = $script:PythonExe
++    $script:StockLayoutPrefix = @($script:PythonPrefix + (Join-Path $PSScriptRoot "stock_layout.py"))
++}
++
++function Get-StockLayout([string]$Input) {
++    $result = & $script:StockLayoutExe $script:StockLayoutPrefix "--backup" $Input "--json"
++    if ($LASTEXITCODE -ne 0) {
++        throw "O backup não corresponde ao layout original validado do AI04. Nenhum firmware foi gravado."
++    }
++    try {
++        return ($result | Out-String | ConvertFrom-Json)
++    } catch {
++        throw "Não foi possível interpretar a validação do layout do AI04. Nenhum firmware foi gravado."
++    }
++}
++
+ if (-not $OpenNetwork -and -not $WifiPassword) {
+     $WifiPassword = Read-Host "Senha do Wi-Fi" -AsSecureString
+ }
+@@ -166,6 +191,11 @@ Invoke-Esptool @("--chip", "esp32c3", "--port", $Port, "--baud", $Baud, "read-fl
+ if ((Get-Item -LiteralPath $backup).Length -ne $expectedFlashSize) {
+     throw "O backup não tem 8 MiB. O firmware não foi gravado."
+ }
++$stockLayout = Get-StockLayout $backup
++$firmwarePath = Join-Path $payloadDirectory "xiaozhi.bin"
++if ($stockLayout.active_ota_size -lt (Get-Item -LiteralPath $firmwarePath).Length) {
++    throw "O slot OTA ativo não comporta este firmware. Nenhum firmware foi gravado."
++}
+ Copy-Range $backup $nvsOriginal 0x9000 0x4000
+ Invoke-NvsPatcher $nvsOriginal $nvsPrepared $plainPassword
+ $plainPassword = $null
+@@ -173,15 +203,12 @@ $plainPassword = $null
+ $flash = @(
+     "--chip", "esp32c3", "--port", $Port, "--baud", $Baud,
+     "write-flash", "--flash-mode", "dio", "--flash-freq", "80m", "--flash-size", "8MB",
+-    "0x0", (Join-Path $payloadDirectory "bootloader.bin"),
+-    "0x8000", (Join-Path $payloadDirectory "partition-table.bin"),
+     "0x9000", $nvsPrepared,
+-    "0xd000", (Join-Path $payloadDirectory "ota_data_initial.bin"),
+-    "0x20000", (Join-Path $payloadDirectory "xiaozhi.bin"),
+-    "0x600000", (Join-Path $payloadDirectory "generated_assets.bin")
++    $stockLayout.active_ota_offset, $firmwarePath
+ )
+ Invoke-Esptool $flash
+ Remove-Item -LiteralPath $nvsPrepared -Force
+ 
+ Write-Host "Concluído. Backup preservado em: $backup"
++Write-Host "Layout original preservado; firmware instalado em: $($stockLayout.active_ota_label)"
+ Write-Host "Versão PT-BR instalada: $($release.firmware_version)"
+diff --git a/tools/ai04-installer/nvs_patch.py b/tools/ai04-installer/nvs_patch.py
+index b4838c7..ce7e2e6 100644
+--- a/tools/ai04-installer/nvs_patch.py
++++ b/tools/ai04-installer/nvs_patch.py
+@@ -321,6 +321,91 @@ def _select_append_page(image: bytearray, pages: list[PageInfo], required_slots:
+     return replacement.index, 0
+ 
+ 
++def _record_slot_bytes(image: bytes | bytearray, record: Record) -> tuple[bytes, ...]:
++    """Return a record header and every raw payload slot exactly as stored."""
++    page_offset = record.page * PAGE_SIZE
++    return tuple(
++        bytes(image[page_offset + _entry_offset(slot) : page_offset + _entry_offset(slot) + ENTRY_SIZE])
++        for slot in record.slots
++    )
++
++
++def _latest_records(records: Iterable[Record]) -> dict[tuple[int, str], Record]:
++    """Resolve the log to the latest entry for each namespace/key pair."""
++    latest: dict[tuple[int, str], Record] = {}
++    for record in sorted(records, key=lambda item: item.order):
++        latest[(record.namespace, record.key)] = record
++    return latest
++
++
++def _compact_nvs_with_replacements(
++    original: bytes,
++    pages: list[PageInfo],
++    records: list[Record],
++    wifi_namespace: int,
++    replacements: list[bytes],
++) -> bytes:
++    """Repack live NVS entries while retaining one erased page for GC.
++
++    Some factory AI04 units have all three usable NVS pages occupied.  Appending
++    four Wi-Fi keys then fails even though the log contains obsolete entries.
++    Because the installer writes a complete NVS partition from the verified
++    backup, we can safely rebuild the log: retain the newest raw record for
++    every unrelated key byte-for-byte, append the replacement Wi-Fi keys, and
++    leave the fourth page erased for ESP-IDF's garbage collector.
++    """
++    latest = _latest_records(records)
++    retained = {
++        key: record
++        for key, record in latest.items()
++        if not (record.namespace == wifi_namespace and record.key in WIFI_KEYS)
++    }
++    ordered = sorted(retained.values(), key=lambda item: item.order)
++    raw_records = [_record_slot_bytes(original, record) for record in ordered]
++    raw_records.append(tuple(replacements))
++
++    needed_slots = sum(len(item) for item in raw_records)
++    writable_pages = (len(original) // PAGE_SIZE) - 1
++    capacity = writable_pages * ENTRIES_PER_PAGE
++    if needed_slots > capacity:
++        raise NvsFormatError("not enough NVS space to compact Wi-Fi safely")
++
++    output = bytearray(b"\xff" * len(original))
++    active = next(page for page in pages if page.state == PAGE_ACTIVE)
++    assert active.version is not None
++    next_sequence = max(page.sequence or 0 for page in pages) + 1
++
++    record_index = 0
++    slot_index = 0
++    page_index = 0
++    while record_index < len(raw_records):
++        _initialize_page(output, page_index, next_sequence + page_index, active.version)
++        page_data = output[page_index * PAGE_SIZE : (page_index + 1) * PAGE_SIZE]
++        while record_index < len(raw_records):
++            raw_slots = raw_records[record_index]
++            if len(raw_slots) > ENTRIES_PER_PAGE - slot_index:
++                break
++            _append_entries(page_data, slot_index, list(raw_slots))
++            slot_index += len(raw_slots)
++            record_index += 1
++        output[page_index * PAGE_SIZE : (page_index + 1) * PAGE_SIZE] = page_data
++        page_index += 1
++        slot_index = 0
++
++    # Only the final written page remains active.  The others are closed so
++    # ESP-IDF can later garbage-collect them; the final physical page stays FF.
++    for closed_page in range(page_index - 1):
++        struct.pack_into("<I", output, closed_page * PAGE_SIZE, PAGE_FULL)
++
++    _, verified = parse_nvs(output)
++    verified_latest = _latest_records(verified)
++    for key, record in retained.items():
++        copied = verified_latest.get(key)
++        if copied is None or _record_slot_bytes(output, copied) != _record_slot_bytes(original, record):
++            raise NvsFormatError("post-compaction verification found changed unrelated NVS data")
++    return bytes(output)
++
++
+ def _validate_wifi_value(name: str, value: str, maximum_bytes: int, allow_empty: bool = False) -> None:
+     if not isinstance(value, str) or (not value and not allow_empty):
+         raise ValueError(f"{name} must not be empty")
+@@ -364,24 +449,41 @@ def patch_nvs(image: bytes, ssid: str, password: str, ota_url: str, channel: int
+     replacements.extend(_make_u8_entry(wifi_namespace, "channel", channel))
+     replacements.extend(_make_string_entries(wifi_namespace, "ota_url", ota_url))
+ 
+-    append_page_index, append_slot = _select_append_page(output, pages, len(replacements))
+-
+     retired = 0
+     for record in records:
+         if record.namespace != wifi_namespace or record.key not in WIFI_KEYS:
+             continue
+-        page_start = record.page * PAGE_SIZE
+-        page_data = output[page_start : page_start + PAGE_SIZE]
+         for slot in record.slots:
++            page_start = record.page * PAGE_SIZE
++            page_data = output[page_start : page_start + PAGE_SIZE]
+             if _state_at(page_data, slot) == STATE_WRITTEN:
+-                _set_state(page_data, slot, STATE_ERASED)
+                 retired += 1
+-        output[page_start : page_start + PAGE_SIZE] = page_data
+ 
+-    append_start = append_page_index * PAGE_SIZE
+-    append_data = output[append_start : append_start + PAGE_SIZE]
+-    _append_entries(append_data, append_slot, replacements)
+-    output[append_start : append_start + PAGE_SIZE] = append_data
++    compacted = False
++    try:
++        append_page_index, append_slot = _select_append_page(output, pages, len(replacements))
++    except NvsFormatError as exc:
++        if str(exc) != "not enough NVS space to update Wi-Fi safely":
++            raise
++        output = bytearray(
++            _compact_nvs_with_replacements(image, pages, records, wifi_namespace, replacements)
++        )
++        compacted = True
++    else:
++        for record in records:
++            if record.namespace != wifi_namespace or record.key not in WIFI_KEYS:
++                continue
++            page_start = record.page * PAGE_SIZE
++            page_data = output[page_start : page_start + PAGE_SIZE]
++            for slot in record.slots:
++                if _state_at(page_data, slot) == STATE_WRITTEN:
++                    _set_state(page_data, slot, STATE_ERASED)
++            output[page_start : page_start + PAGE_SIZE] = page_data
++
++        append_start = append_page_index * PAGE_SIZE
++        append_data = output[append_start : append_start + PAGE_SIZE]
++        _append_entries(append_data, append_slot, replacements)
++        output[append_start : append_start + PAGE_SIZE] = append_data
+ 
+     # Parse once more before returning an image intended to be flashed.
+     _, verified_records = parse_nvs(output)
+@@ -402,6 +504,7 @@ def patch_nvs(image: bytes, ssid: str, password: str, ota_url: str, channel: int
+         "created_wifi_namespace": created_namespace,
+         "retired_entries": retired,
+         "written_entries": len(replacements),
++        "compacted": compacted,
+         "sha256": hashlib.sha256(output).hexdigest(),
+     }
+     return bytes(output), summary
+diff --git a/tools/ai04-installer/package_windows.ps1 b/tools/ai04-installer/package_windows.ps1
+index 5661f4c..9b00298 100644
+--- a/tools/ai04-installer/package_windows.ps1
++++ b/tools/ai04-installer/package_windows.ps1
+@@ -21,10 +21,13 @@ Push-Location $work
+ try {
+     & $Python @pythonArgs -m PyInstaller --noconfirm --clean --onefile --name nvs_patch $PSScriptRoot\nvs_patch.py
+     if ($LASTEXITCODE -ne 0) { throw "Could not package nvs_patch.exe." }
++    & $Python @pythonArgs -m PyInstaller --noconfirm --clean --onefile --name stock_layout $PSScriptRoot\stock_layout.py
++    if ($LASTEXITCODE -ne 0) { throw "Could not package stock_layout.exe." }
+     & $Python @pythonArgs -m PyInstaller --noconfirm --clean --onefile --collect-all esptool --name esptool $PSScriptRoot\esptool_runner.py
+     if ($LASTEXITCODE -ne 0) { throw "Could not package esptool.exe." }
+     New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
+     Copy-Item (Join-Path $work "dist\nvs_patch.exe") (Join-Path $OutputDirectory "nvs_patch.exe") -Force
++    Copy-Item (Join-Path $work "dist\stock_layout.exe") (Join-Path $OutputDirectory "stock_layout.exe") -Force
+     Copy-Item (Join-Path $work "dist\esptool.exe") (Join-Path $OutputDirectory "esptool.exe") -Force
+ } finally {
+     Pop-Location
+diff --git a/tools/ai04-installer/prepare_release.py b/tools/ai04-installer/prepare_release.py
+index 5d92030..1e560c2 100644
+--- a/tools/ai04-installer/prepare_release.py
++++ b/tools/ai04-installer/prepare_release.py
+@@ -13,10 +13,6 @@ from pathlib import Path
+ 
+ ROOT = Path(__file__).resolve().parent
+ PAYLOADS = {
+-    "bootloader.bin": Path("bootloader/bootloader.bin"),
+-    "partition-table.bin": Path("partition_table/partition-table.bin"),
+-    "ota_data_initial.bin": Path("ota_data_initial.bin"),
+-    "generated_assets.bin": Path("generated_assets.bin"),
+     "xiaozhi.bin": Path("xiaozhi.bin"),
+ }
+ NUMERIC_VERSION = re.compile(r"^\d+(?:\.\d+)*$")
+@@ -62,11 +58,11 @@ def main() -> int:
+         shutil.copy2(source, destination)
+         copied[filename] = {"bytes": destination.stat().st_size, "sha256": sha256(destination)}
+ 
+-    for filename in ("install-ai04.ps1", "README.md", "nvs_patch.py"):
++    for filename in ("install-ai04.ps1", "README.md", "nvs_patch.py", "stock_layout.py"):
+         shutil.copy2(ROOT / filename, args.output / filename)
+     shutil.copy2(ROOT / "esptool_runner.py", tools_dir / "esptool_runner.py")
+     if args.windows_tools:
+-        for filename in ("esptool.exe", "nvs_patch.exe"):
++        for filename in ("esptool.exe", "nvs_patch.exe", "stock_layout.exe"):
+             source = args.windows_tools / filename
+             if not source.is_file():
+                 parser.error(f"required Windows helper is missing: {source}")
+@@ -77,13 +73,11 @@ def main() -> int:
+         "board": "davinci-ai04-c3",
+         "firmware_version": args.version,
+         "flash_size": 8 * 1024 * 1024,
++        "required_stock_layout": "davinci-ai04-c3-stock-8m",
++        "installation_strategy": "preserve-stock-layout",
+         "payload": copied,
+         "flash_offsets": {
+-            "bootloader.bin": "0x0",
+-            "partition-table.bin": "0x8000",
+-            "ota_data_initial.bin": "0xd000",
+-            "xiaozhi.bin": "0x20000",
+-            "generated_assets.bin": "0x600000",
++            "xiaozhi.bin": "currently selected stock OTA slot (validated during install)",
+         },
+     }
+     (args.output / "release.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+diff --git a/tools/ai04-installer/stock_layout.py b/tools/ai04-installer/stock_layout.py
+new file mode 100644
+index 0000000..30f6f69
+--- /dev/null
++++ b/tools/ai04-installer/stock_layout.py
+@@ -0,0 +1,169 @@
++#!/usr/bin/env python3
++"""Validate a stock DaVinci AI04 C3 flash layout without exposing NVS data.
++
++The first PT-BR USB migration must keep the factory partition map untouched.
++This helper validates that a full 8 MiB backup is the known AI04 layout and
++finds the *currently selected* OTA slot.  The installer then replaces only
++that app slot, so the board keeps its original bootloader, model partition,
++partition table, NVS backup and the other firmware slot.
++"""
++
++from __future__ import annotations
++
++import argparse
++import hashlib
++import json
++import struct
++import sys
++import zlib
++from dataclasses import dataclass
++from pathlib import Path
++
++
++FLASH_SIZE = 8 * 1024 * 1024
++PARTITION_TABLE_OFFSET = 0x8000
++PARTITION_TABLE_LENGTH = 0xC00
++PARTITION_ENTRY_SIZE = 32
++PARTITION_MAGIC = 0x50AA
++PARTITION_MD5_MAGIC = 0xEBEB
++OTA_RECORD_SIZE = 32
++OTA_RECORD_OFFSETS = (0xD000, 0xE000)
++OTA_STATE_VALID = 2
++OTA_STATE_UNDEFINED = 0xFFFFFFFF
++
++
++class StockLayoutError(ValueError):
++    """The backup is not safe to use with the AI04 stock-layout migrator."""
++
++
++@dataclass(frozen=True)
++class Partition:
++    label: str
++    type: int
++    subtype: int
++    offset: int
++    size: int
++    flags: int
++
++
++EXPECTED_PARTITIONS = (
++    Partition("nvs", 0x01, 0x02, 0x9000, 0x4000, 0),
++    Partition("otadata", 0x01, 0x00, 0xD000, 0x2000, 0),
++    Partition("phy_init", 0x01, 0x01, 0xF000, 0x1000, 0),
++    Partition("model", 0x01, 0x82, 0x10000, 0xF0000, 0),
++    Partition("ota_0", 0x00, 0x10, 0x100000, 0x380000, 0),
++    Partition("ota_1", 0x00, 0x11, 0x480000, 0x380000, 0),
++)
++
++
++def _esp_crc32(data: bytes) -> int:
++    """CRC convention used by ESP-IDF's OTA-select records."""
++    return zlib.crc32(data, 0xFFFFFFFF) & 0xFFFFFFFF
++
++
++def _partition_table(backup: bytes) -> tuple[list[Partition], str]:
++    table = backup[PARTITION_TABLE_OFFSET : PARTITION_TABLE_OFFSET + PARTITION_TABLE_LENGTH]
++    if len(table) != PARTITION_TABLE_LENGTH:
++        raise StockLayoutError("backup does not contain the full partition table")
++
++    partitions: list[Partition] = []
++    found_md5 = False
++    for offset in range(0, len(table), PARTITION_ENTRY_SIZE):
++        magic = struct.unpack_from("<H", table, offset)[0]
++        if magic == 0xFFFF:
++            break
++        if magic == PARTITION_MD5_MAGIC:
++            if table[offset + 2 : offset + 16] != b"\xff" * 14:
++                raise StockLayoutError("partition-table MD5 record has an invalid header")
++            expected_digest = hashlib.md5(table[:offset]).digest()
++            if table[offset + 16 : offset + 32] != expected_digest:
++                raise StockLayoutError("partition-table MD5 validation failed")
++            found_md5 = True
++            break
++        if magic != PARTITION_MAGIC:
++            raise StockLayoutError(f"unexpected partition-table entry at 0x{offset:x}")
++
++        _, part_type, subtype, part_offset, size, raw_label, flags = struct.unpack_from(
++            "<HBBII16sI", table, offset
++        )
++        try:
++            label = raw_label.split(b"\0", 1)[0].decode("ascii")
++        except UnicodeDecodeError as exc:
++            raise StockLayoutError("partition table contains a non-ASCII label") from exc
++        partitions.append(Partition(label, part_type, subtype, part_offset, size, flags))
++
++    if not found_md5:
++        raise StockLayoutError("partition-table MD5 record is missing")
++    return partitions, hashlib.md5(table[: len(partitions) * PARTITION_ENTRY_SIZE]).hexdigest()
++
++
++def _active_ota_partition(backup: bytes, partitions: list[Partition]) -> tuple[int, Partition, int]:
++    ota_partitions = [part for part in partitions if part.type == 0x00 and 0x10 <= part.subtype <= 0x1F]
++    ota_partitions.sort(key=lambda item: item.subtype)
++    if len(ota_partitions) != 2:
++        raise StockLayoutError("stock AI04 layout must contain exactly two OTA app slots")
++
++    valid_records: list[tuple[int, int]] = []
++    for offset in OTA_RECORD_OFFSETS:
++        sequence, _label, state, crc = struct.unpack_from("<I20sII", backup, offset)
++        if sequence == 0xFFFFFFFF:
++            continue
++        if crc != _esp_crc32(struct.pack("<I", sequence)):
++            continue
++        if state not in (OTA_STATE_VALID, OTA_STATE_UNDEFINED):
++            continue
++        valid_records.append((sequence, offset))
++
++    if not valid_records:
++        raise StockLayoutError("no validated active OTA selection was found")
++    sequence, _record_offset = max(valid_records)
++    slot = (sequence - 1) % len(ota_partitions)
++    return slot, ota_partitions[slot], sequence
++
++
++def inspect_stock_layout(backup: bytes) -> dict[str, object]:
++    """Return a non-sensitive structural summary or raise StockLayoutError."""
++    if len(backup) != FLASH_SIZE:
++        raise StockLayoutError(f"expected a complete 8 MiB backup, got {len(backup)} bytes")
++
++    partitions, table_md5 = _partition_table(backup)
++    if tuple(partitions) != EXPECTED_PARTITIONS:
++        raise StockLayoutError("partition table does not match the verified DaVinci AI04 C3 8 MiB layout")
++
++    slot, partition, sequence = _active_ota_partition(backup, partitions)
++    return {
++        "format": 1,
++        "board": "davinci-ai04-c3-stock-8m",
++        "flash_size": FLASH_SIZE,
++        "partition_table_md5": table_md5,
++        "active_ota_slot": slot,
++        "active_ota_label": partition.label,
++        "active_ota_offset": f"0x{partition.offset:x}",
++        "active_ota_size": partition.size,
++        "active_ota_sequence": sequence,
++        "backup_sha256": hashlib.sha256(backup).hexdigest(),
++    }
++
++
++def main(argv: list[str] | None = None) -> int:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--backup", type=Path, required=True, help="complete 8 MiB flash dump")
++    parser.add_argument("--json", action="store_true", help="emit machine-readable structural metadata")
++    args = parser.parse_args(argv)
++
++    try:
++        result = inspect_stock_layout(args.backup.read_bytes())
++    except (OSError, StockLayoutError) as exc:
++        print(f"ERRO: {exc}", file=sys.stderr)
++        return 2
++
++    if args.json:
++        print(json.dumps(result, separators=(",", ":")))
++    else:
++        print("Layout AI04 original validado")
++        print(f"Slot OTA ativo: {result['active_ota_label']} ({result['active_ota_offset']})")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/ai04-installer/test_nvs_patch.py b/tools/ai04-installer/test_nvs_patch.py
+index 7890065..fdb5248 100644
+--- a/tools/ai04-installer/test_nvs_patch.py
++++ b/tools/ai04-installer/test_nvs_patch.py
+@@ -95,6 +95,38 @@ class NvsPatchTests(unittest.TestCase):
+         self.assertEqual(pages[0].state, nvs_patch.PAGE_FULL)
+         self.assertEqual(pages[1].state, nvs_patch.PAGE_ACTIVE)
+ 
++    def test_compacts_full_factory_log_without_losing_other_keys(self) -> None:
++        image = bytearray(make_fixture())
++        filler = nvs_patch._make_u8_entry(2, "fill", 1)
++
++        # Simulate the stock AI04 case: two closed pages plus an almost-full
++        # active page, while the final page remains the GC reserve.
++        for page_index, sequence, free_slots in ((0, 7, 0), (1, 8, 0), (2, 9, 4)):
++            if page_index:
++                nvs_patch._initialize_page(image, page_index, sequence, nvs_patch.VERSION_V1)
++            start = page_index * nvs_patch.PAGE_SIZE
++            page = image[start : start + nvs_patch.PAGE_SIZE]
++            slot = nvs_patch._first_append_slot(page)
++            while nvs_patch.ENTRIES_PER_PAGE - slot > free_slots:
++                nvs_patch._append_entries(page, slot, filler)
++                slot += 1
++            image[start : start + nvs_patch.PAGE_SIZE] = page
++            if page_index < 2:
++                struct.pack_into("<I", image, start, nvs_patch.PAGE_FULL)
++
++        patched, summary = nvs_patch.patch_nvs(
++            bytes(image),
++            ssid="Office",
++            password="12345678",
++            ota_url="https://ota.example.net/ota/",
++        )
++        self.assertTrue(summary["compacted"])
++        pages, records = nvs_patch.parse_nvs(patched)
++        self.assertEqual(pages[0].state, nvs_patch.PAGE_ACTIVE)
++        self.assertEqual(pages[3].state, nvs_patch.PAGE_EMPTY)
++        kept = next(record for record in records if record.namespace == 2 and record.key == "device_id")
++        self.assertEqual(string_value(patched, kept), "keep-me")
++
+     def test_rejects_bad_header_crc(self) -> None:
+         image = bytearray(make_fixture())
+         image[28] ^= 0x01
+diff --git a/tools/ai04-installer/test_stock_layout.py b/tools/ai04-installer/test_stock_layout.py
+new file mode 100644
+index 0000000..ee267d0
+--- /dev/null
++++ b/tools/ai04-installer/test_stock_layout.py
+@@ -0,0 +1,60 @@
++#!/usr/bin/env python3
++"""Focused regression tests for the AI04 stock-layout validator."""
++
++from __future__ import annotations
++
++import hashlib
++import struct
++import unittest
++import zlib
++
++from stock_layout import EXPECTED_PARTITIONS, PARTITION_ENTRY_SIZE, inspect_stock_layout
++
++
++def esp_crc32(data: bytes) -> int:
++    return zlib.crc32(data, 0xFFFFFFFF) & 0xFFFFFFFF
++
++
++def make_backup() -> bytearray:
++    image = bytearray(b"\xff" * (8 * 1024 * 1024))
++    table = bytearray(b"\xff" * 0xC00)
++    for index, part in enumerate(EXPECTED_PARTITIONS):
++        struct.pack_into(
++            "<HBBII16sI",
++            table,
++            index * PARTITION_ENTRY_SIZE,
++            0x50AA,
++            part.type,
++            part.subtype,
++            part.offset,
++            part.size,
++            part.label.encode("ascii").ljust(16, b"\0"),
++            part.flags,
++        )
++    md5_offset = len(EXPECTED_PARTITIONS) * PARTITION_ENTRY_SIZE
++    struct.pack_into("<H", table, md5_offset, 0xEBEB)
++    table[md5_offset + 16 : md5_offset + 32] = hashlib.md5(table[:md5_offset]).digest()
++    image[0x8000 : 0x8C00] = table
++
++    for record_offset, sequence in ((0xD000, 1), (0xE000, 2)):
++        struct.pack_into("<I20sII", image, record_offset, sequence, b"\xff" * 20, 2,
++                         esp_crc32(struct.pack("<I", sequence)))
++    return image
++
++
++class StockLayoutTests(unittest.TestCase):
++    def test_detects_active_ota_1(self) -> None:
++        result = inspect_stock_layout(make_backup())
++        self.assertEqual(result["active_ota_slot"], 1)
++        self.assertEqual(result["active_ota_label"], "ota_1")
++        self.assertEqual(result["active_ota_offset"], "0x480000")
++
++    def test_rejects_changed_partition_map(self) -> None:
++        backup = make_backup()
++        backup[0x8000 + 8] ^= 1
++        with self.assertRaisesRegex(ValueError, "partition-table MD5"):
++            inspect_stock_layout(backup)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tools/ai04-ota/README.md b/tools/ai04-ota/README.md
+index a15c588..a13fcb1 100644
+--- a/tools/ai04-ota/README.md
++++ b/tools/ai04-ota/README.md
+@@ -1,4 +1,13 @@
+-# AI04 OTA relay
++# AI04 OTA relay (legacy alternative)
++
++The current AI04 PT-BR overlay uses a native static manifest and does **not**
++need this Cloudflare Worker. It retains the official XiaoZhi endpoint for
++activation and connection configuration, then loads its PT-BR firmware offer
++from `CONFIG_AI04_OTA_MANIFEST_URL` without forwarding device identity to the
++release host.
++
++Keep this Worker only when a downstream deployment explicitly needs a server
++side relay. It is not part of the default installer path.
+ 
+ The reconstructed AI04 firmware keeps the official `davinci-ai04-c3` device
+ identity so XiaoZhi can supply activation, MQTT/WebSocket configuration and
