@@ -1,0 +1,78 @@
+name: AI04 PT-BR candidate
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Monday 01:23 in São Paulo while Brazil uses UTC-3.
+    - cron: "23 4 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai04-ptbr-candidate
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build AI04 PT-BR firmware candidate
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:release-v6.1
+
+    steps:
+      - name: Check out control repository
+        uses: actions/checkout@v4
+
+      - name: Clone the official XiaoZhi source
+        run: |
+          set -euo pipefail
+          git clone --depth=1 https://github.com/78/xiaozhi-esp32.git xiaozhi
+
+      - name: Apply the verified AI04 overlay
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          archive = Path("AI04-XiaoZhi-Overlay-2.5.3.1.zip")
+          target = Path("xiaozhi")
+          if not archive.is_file():
+              raise SystemExit(f"Missing control-repository artifact: {archive}")
+          with ZipFile(archive) as package:
+              package.extractall(target)
+          PY
+
+      - name: Validate and build the native PT-BR firmware
+        working-directory: xiaozhi
+        env:
+          XIAOZHI_PROJECT_VERSION: 2.5.3.${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          source "$IDF_PATH/export.sh"
+          python -m unittest scripts.tests.test_build.BoardMenuTests.test_board_menu_is_sorted_and_matches_cmake -v
+          python tools/ai04-installer/test_nvs_patch.py
+          python scripts/build.py davinci/ai04-c3 --language pt-BR --wake-word disabled
+
+      - name: Assemble the review-only release candidate
+        working-directory: xiaozhi
+        env:
+          FIRMWARE_VERSION: 2.5.3.${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          python tools/ai04-installer/prepare_release.py \
+            --build-dir build \
+            --output "dist/AI04-Updater-${FIRMWARE_VERSION}" \
+            --version "$FIRMWARE_VERSION"
+          cp build/xiaozhi.bin "dist/xiaozhi-${FIRMWARE_VERSION}.bin"
+          sha256sum "dist/xiaozhi-${FIRMWARE_VERSION}.bin" \
+            > "dist/xiaozhi-${FIRMWARE_VERSION}.bin.sha256"
+
+      - name: Upload the firmware candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: AI04-PT-BR-${{ github.run_number }}
+          path: xiaozhi/dist
+          if-no-files-found: error
+          retention-days: 30
