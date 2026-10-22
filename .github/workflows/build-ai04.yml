@@ -16,8 +16,40 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  package-windows-tools:
+    name: Package self-contained Windows tools
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out control repository
+        uses: actions/checkout@v4
+
+      - name: Prepare the verified AI04 installer source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          git clone --depth=1 https://github.com/78/xiaozhi-esp32.git xiaozhi
+          Expand-Archive -Path AI04-XiaoZhi-Overlay-2.5.3.1.zip -DestinationPath xiaozhi -Force
+          $patch = Join-Path $env:GITHUB_WORKSPACE "AI04-2.5.3.1-to-2.5.3.5.patch"
+          git -C xiaozhi apply --check --whitespace=error $patch
+          git -C xiaozhi apply --whitespace=error $patch
+
+      - name: Package the Windows helper executables
+        shell: pwsh
+        working-directory: xiaozhi/tools/ai04-installer
+        run: .\package_windows.ps1 -OutputDirectory "$env:GITHUB_WORKSPACE\windows-tools"
+
+      - name: Upload Windows helper tools for this candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai04-windows-tools
+          path: windows-tools
+          if-no-files-found: error
+          retention-days: 1
+
   build:
     name: Build AI04 PT-BR firmware candidate
+    needs: package-windows-tools
     runs-on: ubuntu-latest
     container:
       image: espressif/idf:release-v6.1
@@ -49,7 +81,7 @@ jobs:
           with ZipFile(archive) as package:
               package.extractall(target)
           PY
-          patch="$GITHUB_WORKSPACE/AI04-2.5.3.1-to-2.5.3.4.patch"
+          patch="$GITHUB_WORKSPACE/AI04-2.5.3.1-to-2.5.3.5.patch"
           test -f "$patch"
           git -C xiaozhi apply --check --whitespace=error "$patch"
           git -C xiaozhi apply --whitespace=error "$patch"
@@ -66,6 +98,12 @@ jobs:
           python tools/ai04-installer/test_stock_layout.py
           python scripts/build.py davinci/ai04-c3 --language pt-BR --wake-word disabled
 
+      - name: Download self-contained Windows helper tools
+        uses: actions/download-artifact@v4
+        with:
+          name: ai04-windows-tools
+          path: windows-tools
+
       - name: Assemble the review-only Windows updater
         working-directory: xiaozhi
         env:
@@ -77,7 +115,8 @@ jobs:
             --build-dir build \
             --output "dist/AI04-Updater-${FIRMWARE_VERSION}" \
             --version "$FIRMWARE_VERSION" \
-            --firmware-url "$AI04_FIRMWARE_URL"
+            --firmware-url "$AI04_FIRMWARE_URL" \
+            --windows-tools "$GITHUB_WORKSPACE/windows-tools"
           cp build/xiaozhi.bin "dist/xiaozhi-${FIRMWARE_VERSION}.bin"
           sha256sum "dist/xiaozhi-${FIRMWARE_VERSION}.bin" \
             > "dist/xiaozhi-${FIRMWARE_VERSION}.bin.sha256"
