@@ -315,36 +315,36 @@ index 894d6b2..5d6ef4f 100644
 @@ -1,8 +1,10 @@
  # Instalador USB do AI04 para Windows
  
--Este diretÃ³rio gera o migrador USB que leva um AI04 da tabela de partiÃ§Ãµes
--legada para o layout atual de 8 MB com duas partiÃ§Ãµes OTA. Ele nÃ£o Ã© um
--atualizador OTA: a migraÃ§Ã£o inicial precisa do cabo USB.
-+Este diretÃ³rio gera o migrador USB para o layout original de 8 MB do AI04.
-+Ele nÃ£o troca a tabela de partiÃ§Ãµes: valida a tabela de fÃ¡brica, mantÃ©m o
-+bootloader, modelo e firmware de recuperaÃ§Ã£o, e grava o PT-BR somente no slot
-+OTA que o prÃ³prio AI04 jÃ¡ estÃ¡ usando. Ele nÃ£o Ã© um atualizador OTA: a primeira
-+instalaÃ§Ã£o precisa do cabo USB.
+-Este diretório gera o migrador USB que leva um AI04 da tabela de partições
+-legada para o layout atual de 8 MB com duas partições OTA. Ele não é um
+-atualizador OTA: a migração inicial precisa do cabo USB.
++Este diretório gera o migrador USB para o layout original de 8 MB do AI04.
++Ele não troca a tabela de partições: valida a tabela de fábrica, mantém o
++bootloader, modelo e firmware de recuperação, e grava o PT-BR somente no slot
++OTA que o próprio AI04 já está usando. Ele não é um atualizador OTA: a primeira
++instalação precisa do cabo USB.
  
  O instalador sempre faz uma leitura completa de 8 MiB antes de gravar. Em vez
- de apagar a identidade do robÃ´, ele preserva a NVS existente e troca somente:
-@@ -10,10 +12,13 @@ de apagar a identidade do robÃ´, ele preserva a NVS existente e troca somente:
+ de apagar a identidade do robô, ele preserva a NVS existente e troca somente:
+@@ -10,10 +12,13 @@ de apagar a identidade do robô, ele preserva a NVS existente e troca somente:
  - `wifi.ssid`
  - `wifi.password`
  - `wifi.channel`
 -- `wifi.ota_url`
 +- `wifi.ota_url` (preenchida automaticamente com o endpoint oficial de
-+  ativaÃ§Ã£o/configuraÃ§Ã£o do XiaoZhi)
++  ativação/configuração do XiaoZhi)
  
--Assim, ativaÃ§Ã£o e dados nÃ£o relacionados permanecem no backup/NVS. A NVS deve
--ser simples (nÃ£o criptografada) e vÃ¡lida; se nÃ£o for, o processo para antes de
-+Assim, ativaÃ§Ã£o e dados nÃ£o relacionados permanecem no backup/NVS. O firmware
-+AI04 decide o binÃ¡rio OTA pelo seu manifesto PT-BR controlado pelo projeto; o
-+valor de `wifi.ota_url` nÃ£o Ã© mais usado como canal de firmware. A NVS deve ser
-+simples (nÃ£o criptografada) e vÃ¡lida; se nÃ£o for, o processo para antes de
+-Assim, ativação e dados não relacionados permanecem no backup/NVS. A NVS deve
+-ser simples (não criptografada) e válida; se não for, o processo para antes de
++Assim, ativação e dados não relacionados permanecem no backup/NVS. O firmware
++AI04 decide o binário OTA pelo seu manifesto PT-BR controlado pelo projeto; o
++valor de `wifi.ota_url` não é mais usado como canal de firmware. A NVS deve ser
++simples (não criptografada) e válida; se não for, o processo para antes de
  gravar o firmware.
  
  ## Preparar um pacote
-@@ -22,11 +27,11 @@ ApÃ³s uma compilaÃ§Ã£o do ESP-IDF, execute. A versÃ£o precisa ser a mesma usada
- para compilar o binÃ¡rio, pois Ã© ela que o dispositivo compara durante o OTA:
+@@ -22,11 +27,11 @@ Após uma compilação do ESP-IDF, execute. A versão precisa ser a mesma usada
+ para compilar o binário, pois é ela que o dispositivo compara durante o OTA:
  
  ```sh
 -XIAOZHI_PROJECT_VERSION=2.5.3.1 python3 scripts/build.py davinci/ai04-c3 --language pt-BR --wake-word disabled
@@ -357,7 +357,7 @@ index 894d6b2..5d6ef4f 100644
 +  --version 2.5.3.4
  ```
  
- O pacote inclui `ota-manifest.template.json`, jÃ¡ com a versÃ£o e SHA-256 do
+ O pacote inclui `ota-manifest.template.json`, já com a versão e SHA-256 do
 @@ -46,19 +51,23 @@ normal:
  
  ```powershell
@@ -366,28 +366,28 @@ index 894d6b2..5d6ef4f 100644
 +.\install-ai04.ps1 -Port COM5 -Ssid "MinhaRede"
  ```
  
- O script pede a senha de forma oculta, cria o backup e exige a confirmaÃ§Ã£o
--`AI04`. Ele sÃ³ aceita uma URL HTTPS do relay OTA controlado. Sem uma URL do
--relay jÃ¡ implantado, nÃ£o rode a migraÃ§Ã£o: a proteÃ§Ã£o contra o firmware oficial
--em inglÃªs depende dela.
+ O script pede a senha de forma oculta, cria o backup e exige a confirmação
+-`AI04`. Ele só aceita uma URL HTTPS do relay OTA controlado. Sem uma URL do
+-relay já implantado, não rode a migração: a proteção contra o firmware oficial
+-em inglês depende dela.
 +`AI04`. Antes de gravar, ele recusa qualquer mapa de flash diferente do AI04
-+original. A URL oficial do XiaoZhi Ã© mantida somente para ativaÃ§Ã£o e
-+configuraÃ§Ã£o; o binÃ¡rio OTA Ã© decidido pelo manifesto PT-BR fixado no firmware.
++original. A URL oficial do XiaoZhi é mantida somente para ativação e
++configuração; o binário OTA é decidido pelo manifesto PT-BR fixado no firmware.
 +Guarde o backup apenas de forma privada: a NVS pode conter credenciais Wi-Fi e
-+tokens de ativaÃ§Ã£o.
++tokens de ativação.
  
- ## VerificaÃ§Ãµes
+ ## Verificações
  
  ```sh
  python3 tools/ai04-installer/test_nvs_patch.py
 +python3 tools/ai04-installer/test_stock_layout.py
  ```
  
--O teste cobre atualizaÃ§Ã£o de Wi-Fi, preservaÃ§Ã£o de outro namespace, criaÃ§Ã£o do
--namespace Wi-Fi, rotaÃ§Ã£o de pÃ¡gina NVS e recusa de dados invÃ¡lidos.
-+Os testes cobrem atualizaÃ§Ã£o de Wi-Fi, preservaÃ§Ã£o de outro namespace, criaÃ§Ã£o
-+do namespace Wi-Fi, rotaÃ§Ã£o de pÃ¡gina NVS, recusa de dados invÃ¡lidos e
-+validaÃ§Ã£o do mapa original/slot OTA ativo.
+-O teste cobre atualização de Wi-Fi, preservação de outro namespace, criação do
+-namespace Wi-Fi, rotação de página NVS e recusa de dados inválidos.
++Os testes cobrem atualização de Wi-Fi, preservação de outro namespace, criação
++do namespace Wi-Fi, rotação de página NVS, recusa de dados inválidos e
++validação do mapa original/slot OTA ativo.
 diff --git a/tools/ai04-installer/install-ai04.ps1 b/tools/ai04-installer/install-ai04.ps1
 index 4db7049..4c3d4fd 100644
 --- a/tools/ai04-installer/install-ai04.ps1
@@ -419,7 +419,7 @@ index 4db7049..4c3d4fd 100644
 +if ($release.board -ne "davinci-ai04-c3" -or $release.flash_size -ne $expectedFlashSize -or
 +    $release.required_stock_layout -ne "davinci-ai04-c3-stock-8m" -or
 +    $release.installation_strategy -ne "preserve-stock-layout") {
-     throw "release.json nÃ£o Ã© um pacote AI04 C3 de 8 MiB vÃ¡lido."
+     throw "release.json não é um pacote AI04 C3 de 8 MiB válido."
  }
  foreach ($property in $release.payload.PSObject.Properties) {
 @@ -132,6 +134,29 @@ if (Test-Path -LiteralPath $script:NvsPatcherExe -PathType Leaf) {
@@ -431,7 +431,7 @@ index 4db7049..4c3d4fd 100644
 +    $script:StockLayoutPrefix = @()
 +} else {
 +    if (-not $script:PythonExe) {
-+        throw "tools\stock_layout.exe nÃ£o foi encontrado e nÃ£o hÃ¡ Python disponÃ­vel."
++        throw "tools\stock_layout.exe não foi encontrado e não há Python disponível."
 +    }
 +    $script:StockLayoutExe = $script:PythonExe
 +    $script:StockLayoutPrefix = @($script:PythonPrefix + (Join-Path $PSScriptRoot "stock_layout.py"))
@@ -440,12 +440,12 @@ index 4db7049..4c3d4fd 100644
 +function Get-StockLayout([string]$Input) {
 +    $result = & $script:StockLayoutExe $script:StockLayoutPrefix "--backup" $Input "--json"
 +    if ($LASTEXITCODE -ne 0) {
-+        throw "O backup nÃ£o corresponde ao layout original validado do AI04. Nenhum firmware foi gravado."
++        throw "O backup não corresponde ao layout original validado do AI04. Nenhum firmware foi gravado."
 +    }
 +    try {
 +        return ($result | Out-String | ConvertFrom-Json)
 +    } catch {
-+        throw "NÃ£o foi possÃ­vel interpretar a validaÃ§Ã£o do layout do AI04. Nenhum firmware foi gravado."
++        throw "Não foi possível interpretar a validação do layout do AI04. Nenhum firmware foi gravado."
 +    }
 +}
 +
@@ -454,12 +454,12 @@ index 4db7049..4c3d4fd 100644
  }
 @@ -166,6 +191,11 @@ Invoke-Esptool @("--chip", "esp32c3", "--port", $Port, "--baud", $Baud, "read-fl
  if ((Get-Item -LiteralPath $backup).Length -ne $expectedFlashSize) {
-     throw "O backup nÃ£o tem 8 MiB. O firmware nÃ£o foi gravado."
+     throw "O backup não tem 8 MiB. O firmware não foi gravado."
  }
 +$stockLayout = Get-StockLayout $backup
 +$firmwarePath = Join-Path $payloadDirectory "xiaozhi.bin"
 +if ($stockLayout.active_ota_size -lt (Get-Item -LiteralPath $firmwarePath).Length) {
-+    throw "O slot OTA ativo nÃ£o comporta este firmware. Nenhum firmware foi gravado."
++    throw "O slot OTA ativo não comporta este firmware. Nenhum firmware foi gravado."
 +}
  Copy-Range $backup $nvsOriginal 0x9000 0x4000
  Invoke-NvsPatcher $nvsOriginal $nvsPrepared $plainPassword
@@ -479,9 +479,9 @@ index 4db7049..4c3d4fd 100644
  Invoke-Esptool $flash
  Remove-Item -LiteralPath $nvsPrepared -Force
  
- Write-Host "ConcluÃ­do. Backup preservado em: $backup"
+ Write-Host "Concluído. Backup preservado em: $backup"
 +Write-Host "Layout original preservado; firmware instalado em: $($stockLayout.active_ota_label)"
- Write-Host "VersÃ£o PT-BR instalada: $($release.firmware_version)"
+ Write-Host "Versão PT-BR instalada: $($release.firmware_version)"
 diff --git a/tools/ai04-installer/nvs_patch.py b/tools/ai04-installer/nvs_patch.py
 index b4838c7..ce7e2e6 100644
 --- a/tools/ai04-installer/nvs_patch.py
