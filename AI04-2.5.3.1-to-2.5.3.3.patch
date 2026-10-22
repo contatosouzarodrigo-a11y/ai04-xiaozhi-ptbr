@@ -1,0 +1,267 @@
+diff --git a/AI04-OVERLAY-README.md b/AI04-OVERLAY-README.md
+index 116a4c3..7a0304d 100644
+--- a/AI04-OVERLAY-README.md
++++ b/AI04-OVERLAY-README.md
+@@ -1,8 +1,8 @@
+ # AI04 C3 overlay for XiaoZhi
+ 
+ This overlay adds the reconstructed `davinci-ai04-c3` board, the PT-BR build
+-path, a controlled OTA relay, an 8 MiB USB migration package and an optional
+-GitHub upstream-candidate workflow to the XiaoZhi source tree.
++path, a native controlled OTA manifest, an 8 MiB USB migration package and an
++optional GitHub upstream-candidate workflow to the XiaoZhi source tree.
+ 
+ ## Apply
+ 
+@@ -38,17 +38,22 @@ version comparison.
+ The migration installer reads all 8 MiB before writing anything, preserves the
+ existing NVS data, and changes only Wi-Fi and `wifi.ota_url`. The v2 layout is
+ not OTA-compatible with the legacy v1 layout, so the first migration must use
+-USB. Do not run it until the controlled HTTPS OTA relay and release manifest
+-have been deployed.
++USB. The installer writes the official XiaoZhi activation/configuration URL;
++the compiled AI04 firmware reads its PT-BR update offer only from the controlled
++HTTPS manifest.
+ 
+ Use a real 8 MiB backup from an original AI04 to validate the NVS patcher
+ before first-device use. The included automated tests use synthetic NVS pages
+ and cannot substitute for that device-specific check.
+ 
+-## OTA relay
++## Native OTA channel
+ 
+-Set the relay's `XIAOZHI_UPSTREAM_URL` to the current official default,
+-`https://api.tenclass.net/xiaozhi/ota/`, and set `AI04_MANIFEST_URL` to the
+-controlled HTTPS manifest that serves the release `xiaozhi.bin`. The official
+-cloud firmware builder cannot compile this reconstructed board until the board
+-definition has been merged upstream.
++For the AI04 only, the native firmware always contacts
++`https://api.tenclass.net/xiaozhi/ota/` for activation, MQTT/WebSocket settings
++and time. It then reads `CONFIG_AI04_OTA_MANIFEST_URL` without transmitting
++device identity. A valid manifest replaces the official firmware offer; a
++missing or invalid manifest removes the firmware offer entirely. That
++fail-closed behavior prevents an English image from being installed.
++
++The official cloud firmware builder cannot compile this reconstructed board
++until the board definition has been merged upstream.
+diff --git a/main/Kconfig.projbuild b/main/Kconfig.projbuild
+index 64c0b46..0d70b4e 100644
+--- a/main/Kconfig.projbuild
++++ b/main/Kconfig.projbuild
+@@ -6,6 +6,14 @@ config OTA_URL
+     help
+         The application will access this URL to check for new firmwares and server address.
+ 
++config AI04_OTA_MANIFEST_URL
++    string "AI04 PT-BR firmware manifest URL"
++    default ""
++    help
++        Only the reconstructed DaVinci AI04 C3 board reads this HTTPS manifest.
++        It supplies the approved PT-BR firmware while the regular OTA endpoint
++        continues to supply activation and XiaoZhi backend configuration.
++
+ choice
+     prompt "Flash Assets"
+     default FLASH_DEFAULT_ASSETS if !USE_EMOTE_MESSAGE_STYLE
+diff --git a/main/boards/davinci/ai04-c3/config.json b/main/boards/davinci/ai04-c3/config.json
+index 78c23d4..de6714b 100644
+--- a/main/boards/davinci/ai04-c3/config.json
++++ b/main/boards/davinci/ai04-c3/config.json
+@@ -8,7 +8,8 @@
+       "sdkconfig_append": [
+         "CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y",
+         "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"partitions/v2/8m.csv\"",
+-        "CONFIG_OTA_URL=\"\"",
++        "CONFIG_OTA_URL=\"https://api.tenclass.net/xiaozhi/ota/\"",
++        "CONFIG_AI04_OTA_MANIFEST_URL=\"https://raw.githubusercontent.com/contatosouzarodrigo-a11y/ai04-xiaozhi-ptbr/ai04-ota/manifest.json\"",
+         "CONFIG_WAKE_WORD_DISABLED=y",
+         "CONFIG_PM_ENABLE=y",
+         "CONFIG_FREERTOS_USE_TICKLESS_IDLE=y",
+diff --git a/main/ota.cc b/main/ota.cc
+index a98a43d..6bbfde9 100644
+--- a/main/ota.cc
++++ b/main/ota.cc
+@@ -54,12 +54,20 @@ Ota::~Ota() {
+ }
+ 
+ std::string Ota::GetCheckVersionUrl() {
++#if CONFIG_BOARD_TYPE_DAVINCI_AI04_C3
++    // The reconstructed AI04 must keep its activation and XiaoZhi backend
++    // connection on the official endpoint.  Its firmware offer is replaced
++    // separately from a controlled PT-BR manifest below, so a stale NVS
++    // ota_url can never restore an English OTA channel.
++    return CONFIG_OTA_URL;
++#else
+     Settings settings("wifi", false);
+     std::string url = settings.GetString("ota_url");
+     if (url.empty()) {
+         url = CONFIG_OTA_URL;
+     }
+     return url;
++#endif
+ }
+ 
+ std::unique_ptr<Http> Ota::SetupHttp() {
+@@ -81,6 +89,69 @@ std::unique_ptr<Http> Ota::SetupHttp() {
+     return http;
+ }
+ 
++#if CONFIG_BOARD_TYPE_DAVINCI_AI04_C3
++bool Ota::ApplyAi04FirmwareManifest() {
++    std::string manifest_url = CONFIG_AI04_OTA_MANIFEST_URL;
++    if (manifest_url.empty()) {
++        ESP_LOGE(TAG, "AI04 PT-BR manifest URL is not configured");
++        return false;
++    }
++
++    // Do not forward the device ID, MAC address, activation headers, or
++    // system-information JSON to the static release host.  Those are needed
++    // only by the official XiaoZhi endpoint above.
++    auto network = Board::GetInstance().GetNetwork();
++    auto http = network->CreateHttp(0);
++    http->SetHeader("Accept", "application/json");
++    if (auto opened = http->Open("GET", manifest_url); !opened) {
++        ESP_LOGE(TAG, "Failed to open AI04 PT-BR manifest: %s", opened.error().ToString().c_str());
++        return false;
++    }
++
++    auto status_code = http->GetStatusCode();
++    if (!status_code) {
++        ESP_LOGE(TAG, "Failed to read AI04 manifest status: %s", status_code.error().ToString().c_str());
++        return false;
++    }
++    if (*status_code != 200) {
++        ESP_LOGE(TAG, "Failed to get AI04 PT-BR manifest, status code: %d", *status_code);
++        return false;
++    }
++
++    std::string data = http->ReadAll();
++    http->Close();
++    cJSON* root = cJSON_Parse(data.c_str());
++    if (root == NULL) {
++        ESP_LOGE(TAG, "Failed to parse AI04 PT-BR manifest");
++        return false;
++    }
++
++    cJSON* firmware = cJSON_GetObjectItem(root, "firmware");
++    cJSON* version = cJSON_IsObject(firmware) ? cJSON_GetObjectItem(firmware, "version") : NULL;
++    cJSON* url = cJSON_IsObject(firmware) ? cJSON_GetObjectItem(firmware, "url") : NULL;
++    const bool valid_https_url = cJSON_IsString(url) && url->valuestring != NULL &&
++        std::strncmp(url->valuestring, "https://", std::strlen("https://")) == 0;
++    const bool valid_version = cJSON_IsString(version) && version->valuestring != NULL &&
++        ParseVersion(version->valuestring).has_value();
++    if (!valid_version || !valid_https_url) {
++        ESP_LOGE(TAG, "AI04 PT-BR manifest has no valid numeric version and HTTPS firmware URL");
++        cJSON_Delete(root);
++        return false;
++    }
++
++    firmware_version_ = version->valuestring;
++    firmware_url_ = url->valuestring;
++    has_new_version_ = IsNewVersionAvailable(current_version_, firmware_version_);
++    cJSON* force = cJSON_GetObjectItem(firmware, "force");
++    if (cJSON_IsNumber(force) && force->valueint == 1) {
++        has_new_version_ = true;
++    }
++    ESP_LOGI(TAG, "AI04 PT-BR manifest version: %s", firmware_version_.c_str());
++    cJSON_Delete(root);
++    return true;
++}
++#endif
++
+ /* 
+  * Specification: https://ccnphfhqs21z.feishu.cn/wiki/FjW6wZmisimNBBkov6OcmfvknVd
+  */
+@@ -253,6 +324,17 @@ NetworkResult<> Ota::CheckVersion() {
+         ESP_LOGW(TAG, "No firmware section found!");
+     }
+ 
++#if CONFIG_BOARD_TYPE_DAVINCI_AI04_C3
++    if (!ApplyAi04FirmwareManifest()) {
++        // Fail closed: keep activation/MQTT/WebSocket fields obtained above,
++        // but never fall back to a possibly English official firmware image.
++        has_new_version_ = false;
++        firmware_version_.clear();
++        firmware_url_.clear();
++        ESP_LOGW(TAG, "AI04 PT-BR OTA offer disabled until its manifest is reachable and valid");
++    }
++#endif
++
+     cJSON_Delete(root);
+     return {};
+ }
+@@ -540,4 +622,3 @@ esp_err_t Ota::Activate() {
+     ESP_LOGI(TAG, "Activation successful");
+     return ESP_OK;
+ }
+-
+diff --git a/main/ota.h b/main/ota.h
+index d1f6f38..3c86908 100644
+--- a/main/ota.h
++++ b/main/ota.h
+@@ -56,7 +56,9 @@ private:
+     bool IsNewVersionAvailable(const std::string& currentVersion, const std::string& newVersion);
+     std::string GetActivationPayload();
+     std::unique_ptr<Http> SetupHttp();
++#if CONFIG_BOARD_TYPE_DAVINCI_AI04_C3
++    bool ApplyAi04FirmwareManifest();
++#endif
+ };
+ 
+ #endif // _OTA_H
+-
+diff --git a/tools/ai04-installer/README.md b/tools/ai04-installer/README.md
+index 894d6b2..9c04dcd 100644
+--- a/tools/ai04-installer/README.md
++++ b/tools/ai04-installer/README.md
+@@ -10,10 +10,13 @@ de apagar a identidade do robô, ele preserva a NVS existente e troca somente:
+ - `wifi.ssid`
+ - `wifi.password`
+ - `wifi.channel`
+-- `wifi.ota_url`
++- `wifi.ota_url` (preenchida automaticamente com o endpoint oficial de
++  ativação/configuração do XiaoZhi)
+ 
+-Assim, ativação e dados não relacionados permanecem no backup/NVS. A NVS deve
+-ser simples (não criptografada) e válida; se não for, o processo para antes de
++Assim, ativação e dados não relacionados permanecem no backup/NVS. O firmware
++AI04 decide o binário OTA pelo seu manifesto PT-BR controlado pelo projeto; o
++valor de `wifi.ota_url` não é mais usado como canal de firmware. A NVS deve ser
++simples (não criptografada) e válida; se não for, o processo para antes de
+ gravar o firmware.
+ 
+ ## Preparar um pacote
+diff --git a/tools/ai04-installer/install-ai04.ps1 b/tools/ai04-installer/install-ai04.ps1
+index 4db7049..d046258 100644
+--- a/tools/ai04-installer/install-ai04.ps1
++++ b/tools/ai04-installer/install-ai04.ps1
+@@ -12,9 +12,8 @@ param(
+ 
+     [switch]$OpenNetwork,
+ 
+-    [Parameter(Mandatory = $true)]
+     [ValidatePattern("^https://")]
+-    [string]$OtaUrl,
++    [string]$OtaUrl = "https://api.tenclass.net/xiaozhi/ota/",
+ 
+     [ValidateRange(0, 14)]
+     [int]$Channel = 0,
+diff --git a/tools/ai04-ota/README.md b/tools/ai04-ota/README.md
+index a15c588..a13fcb1 100644
+--- a/tools/ai04-ota/README.md
++++ b/tools/ai04-ota/README.md
+@@ -1,4 +1,13 @@
+-# AI04 OTA relay
++# AI04 OTA relay (legacy alternative)
++
++The current AI04 PT-BR overlay uses a native static manifest and does **not**
++need this Cloudflare Worker. It retains the official XiaoZhi endpoint for
++activation and connection configuration, then loads its PT-BR firmware offer
++from `CONFIG_AI04_OTA_MANIFEST_URL` without forwarding device identity to the
++release host.
++
++Keep this Worker only when a downstream deployment explicitly needs a server
++side relay. It is not part of the default installer path.
+ 
+ The reconstructed AI04 firmware keeps the official `davinci-ai04-c3` device
+ identity so XiaoZhi can supply activation, MQTT/WebSocket configuration and
